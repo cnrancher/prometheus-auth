@@ -6,7 +6,6 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/cockroachdb/cockroach/pkg/util/httputil"
 	"github.com/golang/protobuf/proto"
 	"github.com/golang/snappy"
 	"github.com/juju/errors"
@@ -49,7 +48,7 @@ type jsonResponseData struct {
 func (c *apiContext) responseJSON(data interface{}) (err error) {
 	c.Do(func() {
 		resp := c.response
-		resp.Header().Set(httputil.ContentTypeHeader, httputil.JSONContentType)
+		resp.Header().Set(contentTypeHeader, jsonContentType)
 
 		responseData := &jsonResponseData{
 			Status: "success",
@@ -73,8 +72,8 @@ func (c *apiContext) responseJSON(data interface{}) (err error) {
 func (c *apiContext) responseProto(data proto.Message) (err error) {
 	c.Do(func() {
 		resp := c.response
-		resp.Header().Set(httputil.ContentTypeHeader, httputil.ProtoContentType)
-		resp.Header().Set(httputil.ContentEncodingHeader, "snappy")
+		resp.Header().Set(contentTypeHeader, protoContentType)
+		resp.Header().Set(contentEncodingHeader, "snappy")
 
 		if data == nil {
 			resp.WriteHeader(http.StatusNoContent)
@@ -102,7 +101,7 @@ func (c *apiContext) responseMetrics(data *promgo.MetricFamily) (err error) {
 
 		respFormat := expfmt.Negotiate(req.Header)
 		respEncoder := expfmt.NewEncoder(resp, respFormat)
-		resp.Header().Set(httputil.ContentTypeHeader, string(respFormat))
+		resp.Header().Set(contentTypeHeader, string(respFormat))
 
 		if data == nil {
 			return
@@ -167,10 +166,10 @@ func (f apiContextHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		responseErrType = "execution"
 	}
 
-	acceptHeaderValue := r.Header.Get(httputil.AcceptHeader)
-	contentTypeHeaderValue := w.Header().Get(httputil.ContentTypeHeader)
-	if !strings.Contains(acceptHeaderValue, httputil.JSONContentType) &&
-		!strings.EqualFold(contentTypeHeaderValue, httputil.JSONContentType) {
+	acceptHeaderValue := r.Header.Get(acceptHeader)
+	contentTypeHeaderValue := w.Header().Get(contentTypeHeader)
+	if !strings.Contains(acceptHeaderValue, jsonContentType) &&
+		!strings.EqualFold(contentTypeHeaderValue, jsonContentType) {
 
 		http.Error(w, causeErrMsg, responseCode)
 		return
@@ -190,7 +189,7 @@ func (f apiContextHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	w.Header().Set(httputil.ContentTypeHeader, httputil.JSONContentType)
+	w.Header().Set(contentTypeHeader, jsonContentType)
 	w.WriteHeader(responseCode)
 	if _, writeErr := w.Write(respBytes); writeErr != nil {
 		log.WithError(err).Errorf("failed to write %q into http response", string(respBytes))
