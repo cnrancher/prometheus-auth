@@ -7,14 +7,27 @@ echo Running validation
 
 PACKAGES="$(go list ./...)"
 
-echo Running: go vet
-go vet ${PACKAGES}
-echo Running: gometalinter
-for i in ${PACKAGES}; do
-    if [ -n "$(gometalinter $i | grep -v 'should have comment.*or be unexported' | tee /dev/stderr)" ]; then
-        failed=true
-    fi
-done
-test -z "$failed"
-echo Running: go fmt
-test -z "$(go fmt ${PACKAGES} | tee /dev/stderr)"
+if ! command -v golangci-lint; then
+    echo Skipping validation: no golangci-lint available
+    echo Running: go vet
+    go vet ${PACKAGES}
+    echo Running: go fmt
+    test -z "$(go fmt ${PACKAGES} | tee /dev/stderr)"
+else
+    echo Running: golangci-lint
+    golangci-lint run
+fi
+
+echo Running: go mod check
+GO111MODULE=on go mod tidy
+GO111MODULE=on go mod vendor
+
+if [ -n "$(git status vendor --porcelain --untracked-files=no)" ]; then
+    VENDOR_IS_DIRTY="-dirty"
+fi
+
+if [ -n "$VENDOR_IS_DIRTY" ]; then
+    echo vendor dir is dirty
+    git status vendor --porcelain --untracked-files=no
+    exit 1
+fi
