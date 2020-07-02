@@ -1,0 +1,23 @@
+{
+  "linters": {
+    "disable-all": true,
+    "enable": [
+      "govet",
+      "golint",
+      "goimports",
+      "misspell",
+      "ineffassign",
+      "gofmt"
+    ]
+  },
+  "run": {
+    "skip-files": [
+      "vendor"
+    ],
+    "deadline": "5m",
+    "tests": true,
+    "build-tags": [
+      "test"
+    ]
+  }
+}
