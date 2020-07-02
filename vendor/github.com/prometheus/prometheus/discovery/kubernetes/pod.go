@@ -15,13 +15,13 @@ package kubernetes
 
 import (
 	"context"
-	"fmt"
 	"net"
 	"strconv"
 	"strings"
 
 	"github.com/go-kit/kit/log"
 	"github.com/go-kit/kit/log/level"
+	"github.com/pkg/errors"
 	"github.com/prometheus/common/model"
 	apiv1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -30,6 +30,12 @@ import (
 
 	"github.com/prometheus/prometheus/discovery/targetgroup"
 	"github.com/prometheus/prometheus/util/strutil"
+)
+
+var (
+	podAddCount    = eventCount.WithLabelValues("pod", "add")
+	podUpdateCount = eventCount.WithLabelValues("pod", "update")
+	podDeleteCount = eventCount.WithLabelValues("pod", "delete")
 )
 
 // Pod discovers new pod targets.
@@ -53,15 +59,15 @@ func NewPod(l log.Logger, pods cache.SharedInformer) *Pod {
 	}
 	p.informer.AddEventHandler(cache.ResourceEventHandlerFuncs{
 		AddFunc: func(o interface{}) {
-			eventCount.WithLabelValues("pod", "add").Inc()
+			podAddCount.Inc()
 			p.enqueue(o)
 		},
 		DeleteFunc: func(o interface{}) {
-			eventCount.WithLabelValues("pod", "delete").Inc()
+			podDeleteCount.Inc()
 			p.enqueue(o)
 		},
 		UpdateFunc: func(_, o interface{}) {
-			eventCount.WithLabelValues("pod", "update").Inc()
+			podUpdateCount.Inc()
 			p.enqueue(o)
 		},
 	})
@@ -82,7 +88,9 @@ func (p *Pod) Run(ctx context.Context, ch chan<- []*targetgroup.Group) {
 	defer p.queue.ShutDown()
 
 	if !cache.WaitForCacheSync(ctx.Done(), p.informer.HasSynced) {
-		level.Error(p.logger).Log("msg", "pod informer unable to sync cache")
+		if ctx.Err() != context.Canceled {
+			level.Error(p.logger).Log("msg", "pod informer unable to sync cache")
+		}
 		return
 	}
 
@@ -113,7 +121,7 @@ func (p *Pod) process(ctx context.Context, ch chan<- []*targetgroup.Group) bool 
 		return true
 	}
 	if !exists {
-		send(ctx, p.logger, RolePod, ch, &targetgroup.Group{Source: podSourceFromNamespaceAndName(namespace, name)})
+		send(ctx, ch, &targetgroup.Group{Source: podSourceFromNamespaceAndName(namespace, name)})
 		return true
 	}
 	eps, err := convertToPod(o)
@@ -121,7 +129,7 @@ func (p *Pod) process(ctx context.Context, ch chan<- []*targetgroup.Group) bool 
 		level.Error(p.logger).Log("msg", "converting to Pod object failed", "err", err)
 		return true
 	}
-	send(ctx, p.logger, RolePod, ch, p.buildPod(eps))
+	send(ctx, ch, p.buildPod(eps))
 	return true
 }
 
@@ -131,7 +139,7 @@ func convertToPod(o interface{}) (*apiv1.Pod, error) {
 		return pod, nil
 	}
 
-	return nil, fmt.Errorf("Received unexpected object: %v", o)
+	return nil, errors.Errorf("received unexpected object: %v", o)
 }
 
 const (
@@ -141,9 +149,13 @@ const (
 	podContainerPortNameLabel     = metaLabelPrefix + "pod_container_port_name"
 	podContainerPortNumberLabel   = metaLabelPrefix + "pod_container_port_number"
 	podContainerPortProtocolLabel = metaLabelPrefix + "pod_container_port_protocol"
+	podContainerIsInit            = metaLabelPrefix + "pod_container_init"
 	podReadyLabel                 = metaLabelPrefix + "pod_ready"
+	podPhaseLabel                 = metaLabelPrefix + "pod_phase"
 	podLabelPrefix                = metaLabelPrefix + "pod_label_"
+	podLabelPresentPrefix         = metaLabelPrefix + "pod_labelpresent_"
 	podAnnotationPrefix           = metaLabelPrefix + "pod_annotation_"
+	podAnnotationPresentPrefix    = metaLabelPrefix + "pod_annotationpresent_"
 	podNodeNameLabel              = metaLabelPrefix + "pod_node_name"
 	podHostIPLabel                = metaLabelPrefix + "pod_host_ip"
 	podUID                        = metaLabelPrefix + "pod_uid"
@@ -167,6 +179,7 @@ func podLabels(pod *apiv1.Pod) model.LabelSet {
 		podNameLabel:     lv(pod.ObjectMeta.Name),
 		podIPLabel:       lv(pod.Status.PodIP),
 		podReadyLabel:    podReady(pod),
+		podPhaseLabel:    lv(string(pod.Status.Phase)),
 		podNodeNameLabel: lv(pod.Spec.NodeName),
 		podHostIPLabel:   lv(pod.Status.HostIP),
 		podUID:           lv(string(pod.ObjectMeta.UID)),
@@ -183,13 +196,15 @@ func podLabels(pod *apiv1.Pod) model.LabelSet {
 	}
 
 	for k, v := range pod.Labels {
-		ln := strutil.SanitizeLabelName(podLabelPrefix + k)
-		ls[model.LabelName(ln)] = lv(v)
+		ln := strutil.SanitizeLabelName(k)
+		ls[model.LabelName(podLabelPrefix+ln)] = lv(v)
+		ls[model.LabelName(podLabelPresentPrefix+ln)] = presentValue
 	}
 
 	for k, v := range pod.Annotations {
-		ln := strutil.SanitizeLabelName(podAnnotationPrefix + k)
-		ls[model.LabelName(ln)] = lv(v)
+		ln := strutil.SanitizeLabelName(k)
+		ls[model.LabelName(podAnnotationPrefix+ln)] = lv(v)
+		ls[model.LabelName(podAnnotationPresentPrefix+ln)] = presentValue
 	}
 
 	return ls
@@ -207,7 +222,10 @@ func (p *Pod) buildPod(pod *apiv1.Pod) *targetgroup.Group {
 	tg.Labels = podLabels(pod)
 	tg.Labels[namespaceLabel] = lv(pod.Namespace)
 
-	for _, c := range pod.Spec.Containers {
+	containers := append(pod.Spec.Containers, pod.Spec.InitContainers...)
+	for i, c := range containers {
+		isInit := i >= len(pod.Spec.Containers)
+
 		// If no ports are defined for the container, create an anonymous
 		// target per container.
 		if len(c.Ports) == 0 {
@@ -216,6 +234,7 @@ func (p *Pod) buildPod(pod *apiv1.Pod) *targetgroup.Group {
 			tg.Targets = append(tg.Targets, model.LabelSet{
 				model.AddressLabel:    lv(pod.Status.PodIP),
 				podContainerNameLabel: lv(c.Name),
+				podContainerIsInit:    lv(strconv.FormatBool(isInit)),
 			})
 			continue
 		}
@@ -230,6 +249,7 @@ func (p *Pod) buildPod(pod *apiv1.Pod) *targetgroup.Group {
 				podContainerPortNumberLabel:   lv(ports),
 				podContainerPortNameLabel:     lv(port.Name),
 				podContainerPortProtocolLabel: lv(string(port.Protocol)),
+				podContainerIsInit:            lv(strconv.FormatBool(isInit)),
 			})
 		}
 	}

@@ -20,15 +20,18 @@ import (
 
 	"github.com/go-kit/kit/log/level"
 	"github.com/gogo/protobuf/proto"
+	"github.com/pkg/errors"
 	"github.com/prometheus/client_golang/prometheus"
 	dto "github.com/prometheus/client_model/go"
 	"github.com/prometheus/common/expfmt"
 	"github.com/prometheus/common/model"
+	"github.com/prometheus/prometheus/tsdb"
 
 	"github.com/prometheus/prometheus/pkg/labels"
 	"github.com/prometheus/prometheus/pkg/timestamp"
 	"github.com/prometheus/prometheus/pkg/value"
 	"github.com/prometheus/prometheus/promql"
+	"github.com/prometheus/prometheus/promql/parser"
 	"github.com/prometheus/prometheus/storage"
 )
 
@@ -37,7 +40,15 @@ var (
 		Name: "prometheus_web_federation_errors_total",
 		Help: "Total number of errors that occurred while sending federation responses.",
 	})
+	federationWarnings = prometheus.NewCounter(prometheus.CounterOpts{
+		Name: "prometheus_web_federation_warnings_total",
+		Help: "Total number of warnings that occurred while sending federation responses.",
+	})
 )
+
+func registerFederationMetrics(r prometheus.Registerer) {
+	r.MustRegister(federationWarnings, federationErrors)
+}
 
 func (h *Handler) federation(w http.ResponseWriter, req *http.Request) {
 	h.mtx.RLock()
@@ -50,25 +61,28 @@ func (h *Handler) federation(w http.ResponseWriter, req *http.Request) {
 
 	var matcherSets [][]*labels.Matcher
 	for _, s := range req.Form["match[]"] {
-		matchers, err := promql.ParseMetricSelector(s)
+		matchers, err := parser.ParseMetricSelector(s)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
 		matcherSets = append(matcherSets, matchers)
 	}
-
 	var (
-		mint   = timestamp.FromTime(h.now().Time().Add(-promql.LookbackDelta))
+		mint   = timestamp.FromTime(h.now().Time().Add(-h.lookbackDelta))
 		maxt   = timestamp.FromTime(h.now().Time())
 		format = expfmt.Negotiate(req.Header)
 		enc    = expfmt.NewEncoder(w, format)
 	)
 	w.Header().Set("Content-Type", string(format))
 
-	q, err := h.storage.Querier(req.Context(), mint, maxt)
+	q, err := h.localStorage.Querier(req.Context(), mint, maxt)
 	if err != nil {
 		federationErrors.Inc()
+		if errors.Cause(err) == tsdb.ErrNotReady {
+			http.Error(w, err.Error(), http.StatusServiceUnavailable)
+			return
+		}
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
@@ -76,14 +90,15 @@ func (h *Handler) federation(w http.ResponseWriter, req *http.Request) {
 
 	vec := make(promql.Vector, 0, 8000)
 
-	params := &storage.SelectParams{
-		Start: mint,
-		End:   maxt,
-	}
+	hints := &storage.SelectHints{Start: mint, End: maxt}
 
 	var sets []storage.SeriesSet
 	for _, mset := range matcherSets {
-		s, err := q.Select(params, mset...)
+		s, wrns, err := q.Select(false, hints, mset...)
+		if wrns != nil {
+			level.Debug(h.logger).Log("msg", "Federation select returned warnings", "warnings", wrns)
+			federationWarnings.Add(float64(len(wrns)))
+		}
 		if err != nil {
 			federationErrors.Inc()
 			http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -92,8 +107,8 @@ func (h *Handler) federation(w http.ResponseWriter, req *http.Request) {
 		sets = append(sets, s)
 	}
 
-	set := storage.NewMergeSeriesSet(sets)
-	it := storage.NewBuffer(int64(promql.LookbackDelta / 1e6))
+	set := storage.NewMergeSeriesSet(sets, storage.ChainedSeriesMerge)
+	it := storage.NewBuffer(int64(h.lookbackDelta / 1e6))
 	for set.Next() {
 		s := set.At()
 
@@ -128,21 +143,21 @@ func (h *Handler) federation(w http.ResponseWriter, req *http.Request) {
 	}
 	if set.Err() != nil {
 		federationErrors.Inc()
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		http.Error(w, set.Err().Error(), http.StatusInternalServerError)
 		return
 	}
 
 	sort.Sort(byName(vec))
 
-	externalLabels := h.config.GlobalConfig.ExternalLabels.Clone()
+	externalLabels := h.config.GlobalConfig.ExternalLabels.Map()
 	if _, ok := externalLabels[model.InstanceLabel]; !ok {
 		externalLabels[model.InstanceLabel] = ""
 	}
-	externalLabelNames := make(model.LabelNames, 0, len(externalLabels))
+	externalLabelNames := make([]string, 0, len(externalLabels))
 	for ln := range externalLabels {
 		externalLabelNames = append(externalLabelNames, ln)
 	}
-	sort.Sort(externalLabelNames)
+	sort.Strings(externalLabelNames)
 
 	var (
 		lastMetricName string
@@ -188,7 +203,7 @@ func (h *Handler) federation(w http.ResponseWriter, req *http.Request) {
 				Name:  proto.String(l.Name),
 				Value: proto.String(l.Value),
 			})
-			if _, ok := externalLabels[model.LabelName(l.Name)]; ok {
+			if _, ok := externalLabels[l.Name]; ok {
 				globalUsed[l.Name] = struct{}{}
 			}
 		}
@@ -199,10 +214,10 @@ func (h *Handler) federation(w http.ResponseWriter, req *http.Request) {
 		// Attach global labels if they do not exist yet.
 		for _, ln := range externalLabelNames {
 			lv := externalLabels[ln]
-			if _, ok := globalUsed[string(ln)]; !ok {
+			if _, ok := globalUsed[ln]; !ok {
 				protMetric.Label = append(protMetric.Label, &dto.LabelPair{
-					Name:  proto.String(string(ln)),
-					Value: proto.String(string(lv)),
+					Name:  proto.String(ln),
+					Value: proto.String(lv),
 				})
 			}
 		}
@@ -212,6 +227,7 @@ func (h *Handler) federation(w http.ResponseWriter, req *http.Request) {
 
 		protMetricFam.Metric = append(protMetricFam.Metric, protMetric)
 	}
+
 	// Still have to ship off the last MetricFamily, if any.
 	if protMetricFam != nil {
 		if err := enc.Encode(protMetricFam); err != nil {
