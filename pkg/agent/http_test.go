@@ -6,11 +6,9 @@ import (
 	"bytes"
 	"context"
 	"fmt"
-	"io/ioutil"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
-	"os"
 	"reflect"
 	"sort"
 	"strings"
@@ -18,22 +16,25 @@ import (
 	"time"
 	"unsafe"
 
-	"github.com/cockroachdb/cockroach/pkg/util/httputil"
-	"github.com/gogo/protobuf/proto"
-	"github.com/golang/snappy"
-	"github.com/json-iterator/go"
+	jsoniter "github.com/json-iterator/go"
 	promapi "github.com/prometheus/client_golang/api"
 	promapiv1 "github.com/prometheus/client_golang/api/prometheus/v1"
 	"github.com/prometheus/common/model"
 	"github.com/prometheus/prometheus/config"
-	"github.com/prometheus/prometheus/prompb"
+	"github.com/prometheus/prometheus/pkg/labels"
+
+	// "github.com/gogo/protobuf/proto"
+	// "github.com/golang/snappy"
+	// "github.com/prometheus/prometheus/prompb"
 	"github.com/prometheus/prometheus/promql"
+	"github.com/prometheus/prometheus/tsdb"
 	"github.com/prometheus/prometheus/util/testutil"
 	promweb "github.com/prometheus/prometheus/web"
-	promtsdb "github.com/prometheus/tsdb"
 	"github.com/rancher/prometheus-auth/pkg/agent/samples"
 	"github.com/rancher/prometheus-auth/pkg/data"
 	"github.com/rancher/prometheus-auth/pkg/kube"
+	k8scorev1 "k8s.io/api/core/v1"
+	"k8s.io/apiserver/pkg/authentication/user"
 )
 
 func Test_accessControl(t *testing.T) {
@@ -56,15 +57,6 @@ func Test_accessControl(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	dbDir, err := ioutil.TempDir("", "tsdb-ready")
-	defer os.RemoveAll(dbDir)
-
-	testutil.Ok(t, err)
-
-	db, err := promtsdb.Open(dbDir, nil, nil, nil)
-
-	testutil.Ok(t, err)
-
 	webHandler := promweb.New(nil, &promweb.Options{
 		Context:        context.Background(),
 		ListenAddress:  ":9090",
@@ -82,16 +74,16 @@ func Test_accessControl(t *testing.T) {
 			Host:   "localhost:9090",
 			Path:   "/",
 		},
-		TSDB:    func() *promtsdb.DB { return db },
-		Version: &promweb.PrometheusVersion{},
-		Flags:   map[string]string{},
+		LocalStorage: &dbAdapter{suite.TSDB()},
+		Version:      &promweb.PrometheusVersion{},
+		Flags:        map[string]string{},
 	})
 	defer webHandler.Quit()
 
 	err = webHandler.ApplyConfig(&config.Config{
 		GlobalConfig: config.GlobalConfig{
-			ExternalLabels: model.LabelSet{
-				"prometheus": "cluster-level/test",
+			ExternalLabels: labels.Labels{
+				{Name: "prometheus", Value: "cluster-level/test"},
 			},
 		},
 	})
@@ -105,11 +97,17 @@ func Test_accessControl(t *testing.T) {
 	ptrToNow := unsafe.Pointer(nowMemberVal.UnsafeAddr())
 	realPtrToNow := (*func() model.Time)(ptrToNow)
 	*realPtrToNow = func() model.Time { return model.Time(101 * 60 * 1000) } // 101min, federation has 5 min `LookbackDelta`
+
 	apiV1MemberVal := refVal.FieldByName("apiV1").Elem()
 	nowMemberVal2 := apiV1MemberVal.FieldByName("now")
 	ptrToNow2 := unsafe.Pointer(nowMemberVal2.UnsafeAddr())
 	realPtrToNow2 := (*func() time.Time)(ptrToNow2)
 	*realPtrToNow2 = func() time.Time { return model.Time(0).Time() }
+
+	lookbackDeltaVal := refVal.FieldByName("lookbackDelta")
+	ptrToLookbackDeltaVal := unsafe.Pointer(lookbackDeltaVal.UnsafeAddr())
+	realPtrToLookbackDeltaVal := (*time.Duration)(ptrToLookbackDeltaVal)
+	*realPtrToLookbackDeltaVal = 5 * time.Minute // federation has 5 min `LookbackDelta`
 
 	startPrometheusWebHandler(t, webHandler)
 
@@ -120,14 +118,16 @@ func Test_accessControl(t *testing.T) {
 		t.Log("federate testing begin ...")
 
 		tokenScenariosMap := map[string]map[string]samples.Scenario{
-			"noneNamespacesToken": samples.NoneNamespacesTokenFederateScenarios,
-			"someNamespacesToken": samples.SomeNamespacesTokenFederateScenarios,
+			"noneNamespacesUserName": samples.NoneNamespacesTokenFederateScenarios,
+			"someNamespacesUserName": samples.SomeNamespacesTokenFederateScenarios,
 		}
 
 		for token, tokenScenarios := range tokenScenariosMap {
 			for name, tokenScenario := range tokenScenarios {
+				println("testing", token, name)
 				req := httptest.NewRequest("GET", "http://example.org/federate?"+tokenScenario.Queries.Encode(), nil)
-				req.Header.Set(authorizationHeaderKey, fmt.Sprintf("Bearer %s", token))
+				req.Header.Set(rancherUserHeaderKey, token)
+
 				res := httptest.NewRecorder()
 				httpBackend.ServeHTTP(res, req)
 				if got, want := res.Code, tokenScenario.RespCode; got != want {
@@ -136,8 +136,8 @@ func Test_accessControl(t *testing.T) {
 				if got, want := normalizeResponseBody(res.Body), tokenScenario.RespBody; got != want {
 					t.Errorf("[federate] [GET ] token %q scenario %q: got body\n%s\n, want\n%s\n", token, name, got, want)
 				}
+				println("tested", token, name)
 			}
-
 		}
 
 		t.Log("...federate testing end")
@@ -147,22 +147,24 @@ func Test_accessControl(t *testing.T) {
 		t.Log("label testing begin ...")
 
 		tokenScenariosMap := map[string]map[string]samples.Scenario{
-			"noneNamespacesToken": samples.NoneNamespacesTokenLabelScenarios,
-			"someNamespacesToken": samples.SomeNamespacesTokenLabelScenarios,
+			"noneNamespacesUserName": samples.NoneNamespacesTokenLabelScenarios,
+			"someNamespacesUserName": samples.SomeNamespacesTokenLabelScenarios,
 		}
 
 		for token, tokenScenarios := range tokenScenariosMap {
 			for name, tokenScenario := range tokenScenarios {
+				println("testing", token, name)
 				req := httptest.NewRequest("GET", "http://example.org/api/v1/label/"+tokenScenario.Params["name"]+"/values", nil)
-				req.Header.Set(authorizationHeaderKey, fmt.Sprintf("Bearer %s", token))
+				req.Header.Set(rancherUserHeaderKey, token)
 				res := httptest.NewRecorder()
 				httpBackend.ServeHTTP(res, req)
 				if got, want := res.Code, tokenScenario.RespCode; got != want {
 					t.Errorf("[label] [GET ] token %q scenario %q: got code %d, want %d", token, name, got, want)
 				}
-				if got, want := string(res.Body.Bytes()), jsonResponseBody(tokenScenario.RespBody); got != want {
+				if got, want := res.Body.String(), jsonResponseBody(tokenScenario.RespBody); got != want {
 					t.Errorf("[label] [GET ] token %q scenario %q: got body\n%s\n, want\n%s\n", token, name, got, want)
 				}
+				println("tested", token, name)
 			}
 
 		}
@@ -174,22 +176,23 @@ func Test_accessControl(t *testing.T) {
 		t.Log("query testing begin ...")
 
 		tokenScenariosMap := map[string]map[string]samples.Scenario{
-			"noneNamespacesToken": samples.NoneNamespacesTokenQueryScenarios,
-			"someNamespacesToken": samples.SomeNamespacesTokenQueryScenarios,
+			"noneNamespacesUserName": samples.NoneNamespacesTokenQueryScenarios,
+			"someNamespacesUserName": samples.SomeNamespacesTokenQueryScenarios,
 		}
 
 		for token, tokenScenarios := range tokenScenariosMap {
 			for name, tokenScenario := range tokenScenarios {
+				println("testing", token, name)
 				// GET
 				func(tokenScenario *samples.Scenario, token string, name string) {
 					req := httptest.NewRequest("GET", "http://example.org/api/v1"+tokenScenario.Endpoint+"?"+tokenScenario.Queries.Encode(), nil)
-					req.Header.Set(authorizationHeaderKey, fmt.Sprintf("Bearer %s", token))
+					req.Header.Set(rancherUserHeaderKey, token)
 					res := httptest.NewRecorder()
 					httpBackend.ServeHTTP(res, req)
 					if got, want := res.Code, tokenScenario.RespCode; got != want {
 						t.Errorf("[query] [GET ] token %q scenario %q: got code %d, want %d", token, name, got, want)
 					}
-					if got, want := string(res.Body.Bytes()), jsonResponseBody(tokenScenario.RespBody); got != want {
+					if got, want := res.Body.String(), jsonResponseBody(tokenScenario.RespBody); got != want {
 						t.Errorf("[query] [GET ] token %q scenario %q: got body\n%s\n, want\n%s\n", token, name, got, want)
 					}
 				}(&tokenScenario, token, name)
@@ -197,17 +200,18 @@ func Test_accessControl(t *testing.T) {
 				// POST
 				func(tokenScenario *samples.Scenario, token string, name string) {
 					req := httptest.NewRequest("POST", "http://example.org/api/v1"+tokenScenario.Endpoint, strings.NewReader(tokenScenario.Queries.Encode()))
-					req.Header.Set(httputil.ContentTypeHeader, "application/x-www-form-urlencoded")
-					req.Header.Set(authorizationHeaderKey, fmt.Sprintf("Bearer %s", token))
+					req.Header.Set(contentTypeHeader, "application/x-www-form-urlencoded")
+					req.Header.Set(rancherUserHeaderKey, token)
 					res := httptest.NewRecorder()
 					httpBackend.ServeHTTP(res, req)
 					if got, want := res.Code, tokenScenario.RespCode; got != want {
 						t.Errorf("[query] [POST] token %q scenario %q: got code %d, want %d", token, name, got, want)
 					}
-					if got, want := string(res.Body.Bytes()), jsonResponseBody(tokenScenario.RespBody); got != want {
+					if got, want := res.Body.String(), jsonResponseBody(tokenScenario.RespBody); got != want {
 						t.Errorf("[query] [POST] token %q scenario %q: got body\n%s\n, want\n%s\n", token, name, got, want)
 					}
 				}(&tokenScenario, token, name)
+				println("tested", token, name)
 			}
 
 		}
@@ -215,78 +219,82 @@ func Test_accessControl(t *testing.T) {
 		t.Log("...query testing end")
 	}()
 
-	func() {
-		t.Log("read testing begin ...")
+	// func() {
+	// 	t.Log("read testing begin ...")
 
-		tokenScenariosMap := map[string]map[string]samples.Scenario{
-			"noneNamespacesToken": samples.NoneNamespacesTokenReadScenarios(t),
-			"someNamespacesToken": samples.SomeNamespacesTokenReadScenarios(t),
-		}
+	// 	tokenScenariosMap := map[string]map[string]samples.Scenario{
+	// 		"noneNamespacesUserName": samples.NoneNamespacesTokenReadScenarios(t),
+	// 		"someNamespacesUserName": samples.SomeNamespacesTokenReadScenarios(t),
+	// 	}
 
-		for token, tokenScenarios := range tokenScenariosMap {
-			for name, tokenScenario := range tokenScenarios {
-				// raw -> proto request
-				protoReq := &prompb.ReadRequest{Queries: tokenScenario.PrompbQueries}
-				protoReqData, err := proto.Marshal(protoReq)
-				if err != nil {
-					t.Fatal(err)
-				}
-				compressedProtoReqData := snappy.Encode(nil, protoReqData)
+	// 	for token, tokenScenarios := range tokenScenariosMap {
+	// 		for name, tokenScenario := range tokenScenarios {
+	// 			println("testing", token, name)
+	// 			// raw -> proto request
+	// 			protoReq := &prompb.ReadRequest{Queries: tokenScenario.PrompbQueries}
+	// 			protoReqData, err := proto.Marshal(protoReq)
+	// 			if err != nil {
+	// 				t.Fatal(err)
+	// 			}
+	// 			compressedProtoReqData := snappy.Encode(nil, protoReqData)
 
-				req := httptest.NewRequest("POST", "http://example.org/api/v1/read", bytes.NewBuffer(compressedProtoReqData))
-				req.Header.Set(authorizationHeaderKey, fmt.Sprintf("Bearer %s", token))
-				res := httptest.NewRecorder()
-				httpBackend.ServeHTTP(res, req)
+	// 			req := httptest.NewRequest("POST", "http://example.org/api/v1/read", bytes.NewBuffer(compressedProtoReqData))
+	// 			req.Header.Set(rancherUserHeaderKey, token)
+	// 			res := httptest.NewRecorder()
+	// 			httpBackend.ServeHTTP(res, req)
 
-				if got, want := res.Code, tokenScenario.RespCode; got != want {
-					t.Errorf("[read] [POST] token %q scenario %q: got code %d, want %d", token, name, got, want)
-				}
+	// 			if got, want := res.Code, tokenScenario.RespCode; got != want {
+	// 				t.Errorf("[read] [POST] token %q scenario %q: got code %d, want %d", token, name, got, want)
+	// 			}
 
-				// proto response -> raw
-				compressedProtoResData, err := ioutil.ReadAll(res.Body)
-				if err != nil {
-					t.Fatal(err)
-				}
-				protoResData, err := snappy.Decode(nil, compressedProtoResData)
-				if err != nil {
-					t.Fatal(err)
-				}
-				var protoRes prompb.ReadResponse
-				err = proto.Unmarshal(protoResData, &protoRes)
-				if err != nil {
-					t.Fatal(err)
-				}
+	// 			// proto response -> raw
+	// 			compressedProtoResData, err := ioutil.ReadAll(res.Body)
+	// 			if err != nil {
+	// 				t.Fatal(err)
+	// 			}
+	// 			protoResData, err := snappy.Decode(nil, compressedProtoResData)
+	// 			if err != nil {
+	// 				t.Fatal(err)
+	// 			}
+	// 			var protoRes prompb.ReadResponse
+	// 			err = proto.Unmarshal(protoResData, &protoRes)
+	// 			if err != nil {
+	// 				t.Fatal(err)
+	// 			}
 
-				if got, want := protoRes.Results, tokenScenario.RespBody; !reflect.DeepEqual(got, want) {
-					t.Errorf("[read] [POST] token %q scenario %q: got body\n%v\n, want\n%v\n", token, name, got, want)
-				}
-			}
+	// 			if got, want := protoRes.Results, tokenScenario.RespBody; !reflect.DeepEqual(got, want) {
+	// 				t.Errorf("[read] [POST] token %q scenario %q: got body\n%v\n, want\n%v\n", token, name, got, want)
+	// 			}
+	// 			println("tested", token, name)
+	// 		}
 
-		}
+	// 	}
 
-		t.Log("...read testing end")
-	}()
+	// 	t.Log("...read testing end")
+	// }()
 
 	func() {
 		t.Log("series testing begin ...")
 
 		tokenScenariosMap := map[string]map[string]samples.Scenario{
-			"noneNamespacesToken": samples.NoneNamespacesTokenSeriesScenarios,
-			"someNamespacesToken": samples.SomeNamespacesTokenSeriesScenarios,
+			"noneNamespacesUserName": samples.NoneNamespacesTokenSeriesScenarios,
+			"someNamespacesUserName": samples.SomeNamespacesTokenSeriesScenarios,
 		}
 
 		for token, tokenScenarios := range tokenScenariosMap {
 			for name, tokenScenario := range tokenScenarios {
+				println("testing", token, name)
 				req := httptest.NewRequest("GET", "http://example.org/api/v1/series?"+tokenScenario.Queries.Encode(), nil)
-				req.Header.Set(authorizationHeaderKey, fmt.Sprintf("Bearer %s", token))
+				req.Header.Set(rancherUserHeaderKey, token)
 				res := httptest.NewRecorder()
 				httpBackend.ServeHTTP(res, req)
 				if got, want := res.Code, tokenScenario.RespCode; got != want {
 					t.Errorf("[series] [GET] token %q scenario %q: got code %d, want %d", token, name, got, want)
 				}
-				if got, want := string(res.Body.Bytes()), jsonResponseBody(tokenScenario.RespBody); got != want {
+				if got, want := res.Body.String(), jsonResponseBody(tokenScenario.RespBody); got != want {
 					t.Errorf("[series] [GET] token %q scenario %q: got body\n%s\n, want\n%s\n", token, name, got, want)
 				}
+				println("tested", token, name)
 			}
 
 		}
@@ -353,11 +361,6 @@ func startPrometheusWebHandler(t *testing.T, webHandler *promweb.Handler) {
 	testutil.Ok(t, err)
 	testutil.Equals(t, http.StatusOK, resp.StatusCode)
 
-	resp, err = http.Get("http://localhost:9090/graph")
-
-	testutil.Ok(t, err)
-	testutil.Equals(t, http.StatusOK, resp.StatusCode)
-
 	resp, err = http.Post("http://localhost:9090/api/v2/admin/tsdb/snapshot", "", strings.NewReader(""))
 
 	testutil.Ok(t, err)
@@ -377,7 +380,6 @@ func mockAgent(t *testing.T) *agent {
 
 	agtCfg := &agentConfig{
 		ctx:      context.Background(),
-		myToken:  "myToken",
 		proxyURL: proxyURL,
 		filterReaderLabelSet: data.NewSet(
 			"prometheus",
@@ -395,6 +397,7 @@ func mockAgent(t *testing.T) *agent {
 
 	return &agent{
 		cfg:        agtCfg,
+		nodes:      mockNodes(),
 		namespaces: mockOwnedNamespaces(),
 		remoteAPI:  promapiv1.NewAPI(promClient),
 	}
@@ -432,15 +435,42 @@ type fakeOwnedNamespaces struct {
 	token2Namespaces map[string]data.Set
 }
 
-func (f *fakeOwnedNamespaces) Query(token string) data.Set {
+func (f *fakeOwnedNamespaces) QueryByUser(info *user.DefaultInfo) data.Set {
+	return f.token2Namespaces[info.Name]
+}
+
+func (f *fakeOwnedNamespaces) QueryByToken(token string) data.Set {
 	return f.token2Namespaces[token]
+}
+
+type fakeNodes struct {
+}
+
+func (f *fakeNodes) CanList(info *user.DefaultInfo) bool {
+	return false
+}
+
+func (f *fakeNodes) SACanList(sa *k8scorev1.ServiceAccount) bool {
+	return false
+}
+
+func mockNodes() kube.Nodes {
+	return &fakeNodes{}
 }
 
 func mockOwnedNamespaces() kube.Namespaces {
 	return &fakeOwnedNamespaces{
 		token2Namespaces: map[string]data.Set{
-			"noneNamespacesToken": {},
-			"someNamespacesToken": data.NewSet("ns-a", "ns-b"),
+			"noneNamespacesUserName": {},
+			"someNamespacesUserName": data.NewSet("ns-a", "ns-b"),
 		},
 	}
+}
+
+type dbAdapter struct {
+	*tsdb.DB
+}
+
+func (a *dbAdapter) Stats(statsByLabelName string) (*tsdb.Stats, error) {
+	return a.Head().Stats(statsByLabelName), nil
 }

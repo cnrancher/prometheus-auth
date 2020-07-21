@@ -1,7 +1,6 @@
 package agent
 
 import (
-	"fmt"
 	"io"
 	"io/ioutil"
 	"net"
@@ -13,6 +12,8 @@ import (
 )
 
 const (
+	rancherUserHeaderKey   = "X-RANCHER-USER"
+	rancherGroupHeaderKey  = "X-RANCHER-GROUP"
 	authorizationHeaderKey = "Authorization"
 )
 
@@ -22,11 +23,10 @@ func createHTTPListener(mux cmux.CMux) net.Listener {
 	)
 }
 
-func createGRPCListener(mux cmux.CMux, hostAccessToken string) net.Listener {
+func createGRPCListener(mux cmux.CMux) net.Listener {
 	return mux.Match(
 		http2HeaderFieldEqual(map[string]string{
-			"Content-Type":         "application/grpc",
-			authorizationHeaderKey: fmt.Sprintf("Bearer %s", hostAccessToken),
+			"Content-Type": "application/grpc",
 		}),
 	)
 }

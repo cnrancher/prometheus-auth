@@ -50,6 +50,11 @@ func main() {
 			Usage: "[optional] URL to proxy",
 			Value: "http://localhost:9999",
 		},
+		cli.StringFlag{
+			Name:  "monitoring-namespace",
+			Usage: "[optional] rancher monitoring deployed namespace",
+			Value: "cattle-prometheus",
+		},
 		cli.DurationFlag{
 			Name:  "read-timeout",
 			Usage: "[optional] Maximum duration before timing out read of the request, and closing idle connections",

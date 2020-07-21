@@ -1,5 +1,3 @@
-// +build test
-
 package samples
 
 import (
@@ -67,7 +65,7 @@ var NoneNamespacesTokenQueryScenarios = map[string]Scenario{
 		RespBody: &jsonResponseData{
 			Status:    "error",
 			ErrorType: "bad_data",
-			Error:     `parse error at char 8: could not parse remaining input "][query"...`,
+			Error:     `1:8: parse error: unexpected right bracket ']'`,
 		},
 	},
 	"query - test_metric1": {
@@ -192,7 +190,7 @@ var NoneNamespacesTokenQueryScenarios = map[string]Scenario{
 		RespBody: &jsonResponseData{
 			Status:    "error",
 			ErrorType: "bad_data",
-			Error:     `parse error at char 8: could not parse remaining input "][query"...`,
+			Error:     `1:8: parse error: unexpected right bracket ']'`,
 		},
 	},
 	"query_range - invalid step": {
@@ -373,7 +371,7 @@ var SomeNamespacesTokenQueryScenarios = map[string]Scenario{
 		RespBody: &jsonResponseData{
 			Status:    "error",
 			ErrorType: "bad_data",
-			Error:     `parse error at char 8: could not parse remaining input "][query"...`,
+			Error:     `1:8: parse error: unexpected right bracket ']'`,
 		},
 	},
 	"query - test_metric1": {
@@ -553,7 +551,7 @@ var SomeNamespacesTokenQueryScenarios = map[string]Scenario{
 		RespBody: &jsonResponseData{
 			Status:    "error",
 			ErrorType: "bad_data",
-			Error:     `parse error at char 8: could not parse remaining input "][query"...`,
+			Error:     `1:8: parse error: unexpected right bracket ']'`,
 		},
 	},
 	"query_range - invalid step": {

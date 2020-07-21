@@ -64,7 +64,7 @@ func hijackFederate(apiCtx *apiContext) error {
 	// proxy
 	newReq, err := http.NewRequest(http.MethodGet, reqURL.String(), nil)
 	if err != nil {
-		return errors.Wrap(err, internalErr)
+		return errors.Wrap(err, errInternal)
 	}
 
 	return apiCtx.proxyWith(newReq)
@@ -138,7 +138,7 @@ func hijackQuery(apiCtx *apiContext) error {
 	// proxy
 	newReq, err := http.NewRequest(http.MethodGet, reqURL.String(), nil)
 	if err != nil {
-		return errors.Wrap(err, internalErr)
+		return errors.Wrap(err, errInternal)
 	}
 
 	return apiCtx.proxyWith(newReq)
@@ -239,7 +239,7 @@ func hijackQueryRange(apiCtx *apiContext) error {
 	// proxy
 	newReq, err := http.NewRequest(http.MethodGet, reqURL.String(), nil)
 	if err != nil {
-		return errors.Wrap(err, internalErr)
+		return errors.Wrap(err, errInternal)
 	}
 
 	return apiCtx.proxyWith(newReq)
@@ -307,7 +307,7 @@ func hijackSeries(apiCtx *apiContext) error {
 	// proxy
 	newReq, err := http.NewRequest(http.MethodGet, reqURL.String(), nil)
 	if err != nil {
-		return errors.Wrap(err, internalErr)
+		return errors.Wrap(err, errInternal)
 	}
 
 	return apiCtx.proxyWith(newReq)
@@ -361,7 +361,7 @@ func hijackRead(apiCtx *apiContext) error {
 	// proxy
 	newReq, err := http.NewRequest(http.MethodPost, req.URL.String(), bytes.NewBuffer(compressedData))
 	if err != nil {
-		return errors.Wrap(err, internalErr)
+		return errors.Wrap(err, errInternal)
 	}
 
 	return apiCtx.proxyWith(newReq)
