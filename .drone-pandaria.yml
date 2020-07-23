@@ -1,0 +1,51 @@
+kind: pipeline
+name: default-linux-amd64
+
+platform:
+  os: linux
+  arch: amd64
+
+steps:
+  - name: build
+    image: rancher/dapper:v0.4.1
+    commands:
+      - dapper ci
+    privileged: true
+    volumes:
+      - name: docker
+        path: /var/run/docker.sock
+    when:
+      event:
+        - push
+        - pull_request
+        - tag
+
+  - name: docker-publish
+    image: plugins/docker
+    settings:
+      build_args:
+        - ARCH=amd64
+      custom_dns: 1.1.1.1
+      dockerfile: package/Dockerfile
+      password:
+        from_secret: docker_password
+      repo: reg.cnrancher.com/cnrancher/prometheus-auth
+      tag: "${DRONE_TAG}"
+      username:
+        from_secret: docker_username
+    when:
+      event:
+        - tag
+
+volumes:
+  - name: docker
+    host:
+      path: /var/run/docker.sock
+
+trigger:
+  event:
+    exclude:
+      - promote
+
+node:
+  instance: agent-amd64
