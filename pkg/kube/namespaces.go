@@ -2,41 +2,51 @@ package kube
 
 import (
 	"context"
-	"fmt"
-	"time"
+
+	"github.com/rancher/prometheus-auth/pkg/data"
+	"github.com/rancher/steve/pkg/accesscontrol"
+	v1 "github.com/rancher/types/apis/core/v1"
+	corev1 "github.com/rancher/wrangler-api/pkg/generated/controllers/core/v1"
 
 	"github.com/juju/errors"
-	"github.com/rancher/prometheus-auth/pkg/data"
 	log "github.com/sirupsen/logrus"
-	authorization "k8s.io/api/authorization/v1"
-	core "k8s.io/api/core/v1"
-	meta "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/runtime"
-	"k8s.io/apimachinery/pkg/util/cache"
-	"k8s.io/apimachinery/pkg/watch"
-	"k8s.io/client-go/kubernetes"
-	clientAuthorization "k8s.io/client-go/kubernetes/typed/authorization/v1"
-	clientCache "k8s.io/client-go/tools/cache"
+	k8scorev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/labels"
+	"k8s.io/apiserver/pkg/authentication/user"
 )
 
 const (
-	byTokenIndex     = "byToken"
-	byProjectIDIndex = "byProjectID"
+	ByTokenIndex      = "byToken"
+	ByProjectIDIndex  = "byProjectID"
+	annServiceAccount = "kubernetes.io/service-account.name"
 )
 
 type Namespaces interface {
-	Query(token string) data.Set
+	QueryByUser(info *user.DefaultInfo) data.Set
 }
 
 type namespaces struct {
-	subjectAccessReviewsClient clientAuthorization.SubjectAccessReviewInterface
-	reviewResultTTLCache       *cache.LRUExpireCache
-	secretIndexer              clientCache.Indexer
-	namespaceIndexer           clientCache.Indexer
+	ctx                 context.Context
+	monitoringNamespace string
+	namespaceCache      corev1.NamespaceCache
+	secrets             *Secrets
+	accessStore         accesscontrol.AccessSetLookup
 }
 
-func (n *namespaces) Query(token string) data.Set {
-	ret, err := n.query(token)
+func NewNamespaces(ctx context.Context,
+	namespaceCache corev1.NamespaceCache, secrets *Secrets,
+	acl *accesscontrol.AccessStore, monitoringNs string) Namespaces {
+	return &namespaces{
+		ctx:                 ctx,
+		monitoringNamespace: monitoringNs,
+		namespaceCache:      namespaceCache,
+		secrets:             secrets,
+		accessStore:         acl,
+	}
+}
+
+func (n *namespaces) QueryByUser(info *user.DefaultInfo) data.Set {
+	ret, err := n.queryByUser(info)
 	if err != nil {
 		log.Warnln("failed to query Namespaces", errors.ErrorStack(err))
 	}
@@ -44,140 +54,42 @@ func (n *namespaces) Query(token string) data.Set {
 	return ret
 }
 
-func (n *namespaces) query(token string) (data.Set, error) {
+func (n *namespaces) queryByUser(info *user.DefaultInfo) (data.Set, error) {
 	ret := data.Set{}
-
-	tokenNamespace, err := n.validate(token)
+	objs, err := n.namespaceCache.List(labels.NewSelector())
 	if err != nil {
-		return ret, err
+		return nil, err
 	}
 
-	nsObj, exist, _ := n.namespaceIndexer.GetByKey(tokenNamespace)
-	if !exist {
-		return ret, errors.New("unknown namespace of token")
+	accessControl := NewUserLookupAccess(info, n.accessStore)
+	for _, v := range objs {
+
+		if v.DeletionTimestamp != nil {
+			continue
+		}
+
+		if accessControl.CanAccess(v1.NamespaceGroupVersionKind.Group, v1.NamespaceResource.Name, v.Name, v.Namespace) {
+			if n.monitoringNamespace == v.Name &&
+				!accessControl.CanAccess(v1.PodGroupVersionKind.Group, v1.PodResource.Name, "*", v.Namespace) {
+				continue
+			}
+			ret[v.Name] = struct{}{}
+		}
 	}
 
-	ns := toNamespace(nsObj)
-	if ns.DeletionTimestamp != nil {
-		return ret, errors.New("deleting namespace of token")
-	}
-
-	projectID, exist := getProjectID(ns)
-	if !exist {
-		return ret, errors.New("unknown project of token")
-	}
-
-	nsList, err := n.namespaceIndexer.ByIndex(byProjectIDIndex, projectID)
-	if err != nil {
-		return ret, errors.Annotatef(err, "invalid project")
-	}
-
-	for _, nsObj := range nsList {
-		ns := toNamespace(nsObj)
-		ret[ns.Name] = struct{}{}
-	}
 	return ret, nil
 }
 
-func (n *namespaces) validate(token string) (string, error) {
-	secList, err := n.secretIndexer.ByIndex(byTokenIndex, token)
-	if err != nil || len(secList) != 1 {
-		return "", errors.Annotatef(err, "unknown token")
-	}
-
-	sec := toSecret(secList[0])
-	if sec.DeletionTimestamp != nil {
-		return "", errors.New("deleting token")
-	}
-
-	_, exist := n.reviewResultTTLCache.Get(token)
-	if exist {
-		return sec.Namespace, nil
-	}
-
-	projectMonitoringServiceAccountName := "project-monitoring"
-	sarUser := fmt.Sprintf("system:serviceaccount:%s:%s", sec.Namespace, projectMonitoringServiceAccountName)
-	sar := &authorization.SubjectAccessReview{
-		Spec: authorization.SubjectAccessReviewSpec{
-			ResourceAttributes: &authorization.ResourceAttributes{
-				Namespace: sec.Namespace,
-				Verb:      "view",
-				Group:     "monitoring.cattle.io",
-				Resource:  "prometheus",
-			},
-			User: sarUser,
-		},
-	}
-	reviewResult, err := n.subjectAccessReviewsClient.Create(sar)
-	if err != nil {
-		return "", errors.Annotatef(err, "failed to review token")
-	}
-
-	if !reviewResult.Status.Allowed || reviewResult.Status.Denied {
-		return "", errors.New("denied token")
-	}
-
-	n.reviewResultTTLCache.Add(token, struct{}{}, 5*time.Minute)
-
-	return sec.Namespace, nil
-}
-
-func NewNamespaces(ctx context.Context, k8sClient kubernetes.Interface) Namespaces {
-	// secrets
-	sec := k8sClient.CoreV1().Secrets(meta.NamespaceAll)
-	secListWatch := &clientCache.ListWatch{
-		ListFunc: func(options meta.ListOptions) (object runtime.Object, e error) {
-			return sec.List(options)
-		},
-		WatchFunc: func(options meta.ListOptions) (i watch.Interface, e error) {
-			return sec.Watch(options)
-		},
-	}
-	secInformer := clientCache.NewSharedIndexInformer(secListWatch, &core.Secret{}, 2*time.Hour, clientCache.Indexers{byTokenIndex: secretByToken})
-
-	// namespaces
-	ns := k8sClient.CoreV1().Namespaces()
-	nsListWatch := &clientCache.ListWatch{
-		ListFunc: func(options meta.ListOptions) (object runtime.Object, e error) {
-			return ns.List(options)
-		},
-		WatchFunc: func(options meta.ListOptions) (i watch.Interface, e error) {
-			return ns.Watch(options)
-		},
-	}
-	nsInformer := clientCache.NewSharedIndexInformer(nsListWatch, &core.Namespace{}, 10*time.Minute, clientCache.Indexers{byProjectIDIndex: namespaceByProjectID})
-
-	// run
-	go secInformer.Run(ctx.Done())
-	go nsInformer.Run(ctx.Done())
-
-	return &namespaces{
-		subjectAccessReviewsClient: k8sClient.AuthorizationV1().SubjectAccessReviews(),
-		reviewResultTTLCache:       cache.NewLRUExpireCache(1024),
-		secretIndexer:              secInformer.GetIndexer(),
-		namespaceIndexer:           nsInformer.GetIndexer(),
-	}
-}
-
-func toNamespace(obj interface{}) *core.Namespace {
-	ns, ok := obj.(*core.Namespace)
+func toNamespace(obj interface{}) *k8scorev1.Namespace {
+	ns, ok := obj.(*k8scorev1.Namespace)
 	if !ok {
-		return &core.Namespace{}
+		return &k8scorev1.Namespace{}
 	}
 
 	return ns
 }
 
-func toSecret(obj interface{}) *core.Secret {
-	sec, ok := obj.(*core.Secret)
-	if !ok {
-		return &core.Secret{}
-	}
-
-	return sec
-}
-
-func getProjectID(ns *core.Namespace) (string, bool) {
+func getProjectID(ns *k8scorev1.Namespace) (string, bool) {
 	if ns != nil && ns.Labels != nil {
 		projectID, exist := ns.Labels["field.cattle.io/projectId"]
 		if exist {
@@ -188,22 +100,10 @@ func getProjectID(ns *core.Namespace) (string, bool) {
 	return "", false
 }
 
-func namespaceByProjectID(obj interface{}) ([]string, error) {
+func NamespaceByProjectID(obj interface{}) ([]string, error) {
 	projectID, exist := getProjectID(toNamespace(obj))
 	if exist {
 		return []string{projectID}, nil
-	}
-
-	return []string{}, nil
-}
-
-func secretByToken(obj interface{}) ([]string, error) {
-	sec := toSecret(obj)
-	if sec.Type == core.SecretTypeServiceAccountToken {
-		secretToken := sec.Data[core.ServiceAccountTokenKey]
-		if len(secretToken) != 0 {
-			return []string{string(secretToken)}, nil
-		}
 	}
 
 	return []string{}, nil
