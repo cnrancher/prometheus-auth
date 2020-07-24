@@ -21,16 +21,7 @@ func main() {
 	app.Version = fmt.Sprintf("%s(%s)", VER, HASH)
 	app.Name = "prometheus-auth"
 	app.Usage = "Deploying in the front of Prometheus to intercept and hijack the APIs"
-	app.Description = `
-        ##################################################################################
-        ##                                      RBAC                                    ##
-        ##################################################################################
-        Resources                 Non-Resource URLs  Resource Names       Verbs
-        ---------                 -----------------  --------------       -----
-        namespaces                []                 []                   [list,watch,get]
-        secrets,                  []                 []                   [list,watch,get]
-        selfsubjectaccessreviews  []                 []                   [create]`
-
+	app.Description = `Prometheus-Auth deployed in front of Prometheus, return metrics user can access`
 	app.Flags = []cli.Flag{
 		cli.BoolFlag{
 			Name:  "log.json",
@@ -49,6 +40,12 @@ func main() {
 			Name:  "proxy-url",
 			Usage: "[optional] URL to proxy",
 			Value: "http://localhost:9999",
+		},
+		cli.StringFlag{
+			Name:   "monitoring-namespace",
+			Usage:  "[optional] rancher monitoring deployed namespace",
+			Value:  "cattle-prometheus",
+			EnvVar: "MONITORING_NAMESPACE",
 		},
 		cli.DurationFlag{
 			Name:  "read-timeout",

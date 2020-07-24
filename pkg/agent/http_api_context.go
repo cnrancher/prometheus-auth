@@ -17,14 +17,16 @@ import (
 	"k8s.io/apimachinery/pkg/util/runtime"
 )
 
+type contextKey string
+
 const (
-	apiContextKey = "_apiContext_"
+	apiContextKey contextKey = "_apiContext_"
 )
 
 var (
 	badRequestErr     = errors.BadRequestf("bad_data")
 	notProvisionedErr = errors.NotProvisionedf("execution")
-	internalErr       = errors.New("internal")
+	errInternal       = errors.New("internal")
 )
 
 type apiContext struct {
@@ -57,12 +59,12 @@ func (c *apiContext) responseJSON(data interface{}) (err error) {
 
 		respBytes, marshalErr := json.Marshal(responseData)
 		if marshalErr != nil {
-			err = errors.Wrap(marshalErr, internalErr)
+			err = errors.Wrap(marshalErr, errInternal)
 			return
 		}
 
 		if _, writeErr := resp.Write(respBytes); writeErr != nil {
-			err = errors.Wrap(writeErr, internalErr)
+			err = errors.Wrap(writeErr, errInternal)
 		}
 	})
 
@@ -82,13 +84,13 @@ func (c *apiContext) responseProto(data proto.Message) (err error) {
 
 		responseData, marshalErr := proto.Marshal(data)
 		if marshalErr != nil {
-			err = errors.Wrap(marshalErr, internalErr)
+			err = errors.Wrap(marshalErr, errInternal)
 			return
 		}
 
 		respBytes := snappy.Encode(nil, responseData)
 		if _, writeErr := resp.Write(respBytes); writeErr != nil {
-			err = errors.Wrap(writeErr, internalErr)
+			err = errors.Wrap(writeErr, errInternal)
 		}
 	})
 
@@ -108,7 +110,7 @@ func (c *apiContext) responseMetrics(data *promgo.MetricFamily) (err error) {
 		}
 
 		if encodeErr := respEncoder.Encode(data); encodeErr != nil {
-			err = errors.Wrap(encodeErr, internalErr)
+			err = errors.Wrap(encodeErr, errInternal)
 		}
 	})
 

@@ -8,9 +8,12 @@ import (
 	"strings"
 	"time"
 
+	"github.com/rancher/prometheus-auth/pkg/data"
+
 	"github.com/gorilla/mux"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	log "github.com/sirupsen/logrus"
+	"k8s.io/apiserver/pkg/authentication/user"
 )
 
 func (a *agent) httpBackend() http.Handler {
@@ -59,17 +62,52 @@ func accessControl(agt *agent, proxyHandler http.Handler) http.Handler {
 
 	router.Use(func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			//user header
+			rancherUser := r.Header.Get(rancherUserHeaderKey)
+			rancherGroup := r.Header[rancherGroupHeaderKey]
+
+			//sa header
 			accessToken := strings.TrimPrefix(r.Header.Get(authorizationHeaderKey), "Bearer ")
-			if len(accessToken) == 0 {
+
+			if rancherUser == "" && len(rancherGroup) == 0 && len(accessToken) == 0 {
 				http.Error(w, "unauthorized", http.StatusUnauthorized)
 				return
 			}
 
-			// direct proxy
-			if agt.cfg.myToken == accessToken {
+			var namespaceSet data.Set
+			var info *user.DefaultInfo
+			if rancherUser != "" || len(rancherGroup) != 0 {
+				log.Debugf("%s - %s - access by userID", r.Method, r.URL.Path)
+				info = &user.DefaultInfo{
+					Name:   rancherUser,
+					UID:    rancherUser,
+					Groups: rancherGroup,
+				}
+			} else if len(accessToken) != 0 {
+				log.Debugf("%s - %s - access by accessToken", r.Method, r.URL.Path)
+
+				if agt.myToken == accessToken {
+					proxyHandler.ServeHTTP(w, r)
+					return
+				}
+
+				sa, err := agt.secrets.GetSA(accessToken)
+				if err != nil {
+					http.Error(w, "unauthorized", http.StatusUnauthorized)
+					return
+				}
+
+				info = &user.DefaultInfo{
+					Name: fmt.Sprintf("system:serviceaccount:%s:%s", sa.Namespace, sa.Name),
+				}
+			}
+
+			if agt.nodes.CanList(info) {
 				proxyHandler.ServeHTTP(w, r)
 				return
 			}
+
+			namespaceSet = agt.namespaces.QueryByUser(info)
 
 			apiCtx := &apiContext{
 				tag:                  fmt.Sprintf("%016x", time.Now().Unix()),
@@ -77,9 +115,11 @@ func accessControl(agt *agent, proxyHandler http.Handler) http.Handler {
 				request:              r,
 				proxyHandler:         proxyHandler,
 				filterReaderLabelSet: agt.cfg.filterReaderLabelSet,
-				namespaceSet:         agt.namespaces.Query(accessToken),
+				namespaceSet:         namespaceSet,
 				remoteAPI:            agt.remoteAPI,
 			}
+
+			log.Debugf("common[%s] %s - %s can access namespaces %+v", apiCtx.tag, r.Method, r.URL.Path, apiCtx.namespaceSet.Values())
 
 			newReqCtx := context.WithValue(r.Context(), apiContextKey, apiCtx)
 			next.ServeHTTP(w, r.WithContext(newReqCtx))
