@@ -37,11 +37,10 @@ steps:
       dockerfile: package/Dockerfile
       password:
         from_secret: docker_password
-      repo: reg.cnrancher.com/cnrancher/prometheus-auth
+      repo: cnrancher/prometheus-auth
       tag: "${DRONE_TAG}"
       username:
         from_secret: docker_username
-      registry: reg.cnrancher.com
     volumes:
       - name: docker
         path: /var/run/docker.sock
