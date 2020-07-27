@@ -33,6 +33,10 @@ steps:
       tag: "${DRONE_TAG}"
       username:
         from_secret: docker_username
+      registry: reg.cnrancher.com
+    volumes:
+      - name: docker
+        path: /var/run/docker.sock
     when:
       event:
         - tag
