@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"testing"
 
-	"github.com/juju/errors"
 	"github.com/prometheus/prometheus/pkg/labels"
 	"github.com/prometheus/prometheus/promql/parser"
 	"github.com/rancher/prometheus-auth/pkg/data"
@@ -165,7 +164,7 @@ func TestFilterLabelMatchers(t *testing.T) {
 func walkExpr(name, input, expect string, change func([]*labels.Matcher) ([]*labels.Matcher, error)) error {
 	promlbInputExpr, err := parser.ParseExpr(input)
 	if err != nil {
-		return errors.Annotatef(err, "%s cannot parse expr from %s", name, input)
+		return fmt.Errorf("%s cannot parse expr from %s, %v", name, input, err)
 	}
 
 	parser.Inspect(promlbInputExpr, func(node parser.Node, _ []parser.Node) error {
@@ -173,18 +172,18 @@ func walkExpr(name, input, expect string, change func([]*labels.Matcher) ([]*lab
 		case *parser.VectorSelector:
 			ret, err := change(n.LabelMatchers)
 			if err != nil {
-				return errors.Annotatef(err, "%s causes error", input)
+				return fmt.Errorf("%s causes error, %v", input, err)
 			}
 
 			n.LabelMatchers = ret
 		case *parser.MatrixSelector:
 			vs, ok := n.VectorSelector.(*parser.VectorSelector)
 			if !ok {
-				return errors.New("failed to convert MatrixSelector to VectorSelector")
+				return fmt.Errorf("failed to convert MatrixSelector to VectorSelector")
 			}
 			ret, err := change(vs.LabelMatchers)
 			if err != nil {
-				return errors.Annotatef(err, "%s causes error", input)
+				return fmt.Errorf("%s causes error, %v", input, err)
 			}
 
 			vs.LabelMatchers = ret
