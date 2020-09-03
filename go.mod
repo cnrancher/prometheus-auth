@@ -8,6 +8,8 @@ replace (
 	github.com/crewjam/saml => github.com/rancher/saml v0.0.0-20180713225824-ce1532152fde
 	github.com/openzipkin-contrib/zipkin-go-opentracing => github.com/openzipkin-contrib/zipkin-go-opentracing v0.3.5
 	github.com/prometheus/prometheus => github.com/prometheus/prometheus v0.0.0-20200626085723-c448ada63d83
+	github.com/rancher/prometheus-auth/pkg/data => ./pkg/data
+	github.com/rancher/prometheus-auth/pkg/prom => ./pkg/prom
 	github.com/rancher/steve => github.com/aiwantaozi/steve v0.0.0-20200726010056-fde154f84158
 	k8s.io/client-go => k8s.io/client-go v0.18.0
 )
@@ -22,7 +24,6 @@ require (
 	github.com/json-iterator/go v1.1.9
 	github.com/juju/errors v0.0.0-20200330140219-3fe23663418f
 	github.com/juju/loggo v0.0.0-20180524022052-584905176618 // indirect
-	github.com/juju/testing v0.0.0-20180920084828-472a3e8b2073 // indirect
 	github.com/kr/text v0.2.0 // indirect
 	github.com/mwitkow/grpc-proxy v0.0.0-20181017164139-0f1106ef9c76
 	github.com/onsi/ginkgo v1.13.0 // indirect
@@ -32,13 +33,16 @@ require (
 	github.com/prometheus/prometheus v2.18.2+incompatible
 	github.com/rancher/lasso v0.0.0-20200515155337-a34e1e26ad91
 	github.com/rancher/norman v0.0.0-20200609220258-00d350370ee8 // indirect
+	github.com/rancher/prometheus-auth/pkg/data v0.0.0
+	github.com/rancher/prometheus-auth/pkg/prom v0.0.0
 	github.com/rancher/steve v0.0.0-20200622175150-3dbc369174fb
 	github.com/rancher/types v0.0.0-20200529180020-29fa023a5bd8
 	github.com/rancher/wrangler-api v0.6.1-0.20200515193802-dcf70881b087
 	github.com/sirupsen/logrus v1.4.2
 	github.com/urfave/cli v1.22.2
-	golang.org/x/net v0.0.0-20200602114024-627f9648deb9
-	google.golang.org/grpc v1.29.1
+	golang.org/x/net v0.0.0-20200822124328-c89045814202
+	google.golang.org/grpc v1.31.1
+	google.golang.org/grpc/examples v0.0.0-20200902210233-8630cac324bf // indirect
 	gopkg.in/mgo.v2 v2.0.0-20180705113604-9856a29383ce // indirect
 	k8s.io/api v0.18.5
 	k8s.io/apimachinery v0.18.5
