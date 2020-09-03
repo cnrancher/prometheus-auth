@@ -51,7 +51,7 @@ func hijackFederate(apiCtx *apiContext) error {
 		}
 
 		log.Debugf("raw federate[%s - %d] => %s", apiCtx.tag, idx, rawValue)
-		hjkValue := modifyExpression(expr, apiCtx.namespaceSet)
+		hjkValue := prom.ModifyExpression(expr, apiCtx.namespaceSet)
 		log.Debugf("hjk federate[%s - %d] => %s", apiCtx.tag, idx, hjkValue)
 
 		queries.Add("match[]", hjkValue)
@@ -127,7 +127,7 @@ func hijackQuery(apiCtx *apiContext) error {
 	// hijack
 	req.Form.Del("query")
 	log.Debugf("raw query[%s - 0] => %s", apiCtx.tag, rawValue)
-	hjkValue := modifyExpression(queryExpr, apiCtx.namespaceSet)
+	hjkValue := prom.ModifyExpression(queryExpr, apiCtx.namespaceSet)
 	log.Debugf("hjk query[%s - 0] => %s", apiCtx.tag, hjkValue)
 	req.Form.Set("query", hjkValue)
 
@@ -228,7 +228,7 @@ func hijackQueryRange(apiCtx *apiContext) error {
 	// hijack
 	req.Form.Del("query")
 	log.Debugf("raw query[%s - 0] => %s", apiCtx.tag, rawValue)
-	hjkValue := modifyExpression(queryExpr, apiCtx.namespaceSet)
+	hjkValue := prom.ModifyExpression(queryExpr, apiCtx.namespaceSet)
 	log.Debugf("hjk query[%s - 0] => %s", apiCtx.tag, hjkValue)
 	req.Form.Set("query", hjkValue)
 
@@ -294,7 +294,7 @@ func hijackSeries(apiCtx *apiContext) error {
 		}
 
 		log.Debugf("raw series[%s - %d] => %s", apiCtx.tag, idx, rawValue)
-		hjkValue := modifyExpression(expr, apiCtx.namespaceSet)
+		hjkValue := prom.ModifyExpression(expr, apiCtx.namespaceSet)
 		log.Debugf("hjk series[%s - %d] => %s", apiCtx.tag, idx, hjkValue)
 
 		queries.Add("match[]", hjkValue)
@@ -440,24 +440,6 @@ func parseDuration(s string) (time.Duration, error) {
 		return time.Duration(d), nil
 	}
 	return 0, errors.Errorf("cannot parse %q to a valid duration", s)
-}
-
-func modifyExpression(originalExpr parser.Expr, namespaceSet data.Set) (modifiedExpr string) {
-	parser.Inspect(originalExpr, func(node parser.Node, _ []parser.Node) error {
-		switch n := node.(type) {
-		case *parser.VectorSelector:
-			n.LabelMatchers = prom.FilterMatchers(namespaceSet, n.LabelMatchers)
-		case *parser.MatrixSelector:
-			vs, ok := n.VectorSelector.(*parser.VectorSelector)
-			if !ok {
-				return errors.Errorf("cannot parse MatrixSelector to VectorSelector")
-			}
-			vs.LabelMatchers = prom.FilterMatchers(namespaceSet, vs.LabelMatchers)
-		}
-		return nil
-	})
-
-	return originalExpr.String()
 }
 
 func modifyQuery(originalQuery *prompb.Query, namespaceSet, filterReaderLabelSet data.Set) (modifiedQuery *prompb.Query) {
