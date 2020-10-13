@@ -23,8 +23,6 @@ require (
 	github.com/hashicorp/go-uuid v1.0.2 // indirect
 	github.com/json-iterator/go v1.1.9
 	github.com/juju/errors v0.0.0-20200330140219-3fe23663418f
-	github.com/juju/loggo v0.0.0-20180524022052-584905176618 // indirect
-	github.com/kr/text v0.2.0 // indirect
 	github.com/mwitkow/grpc-proxy v0.0.0-20181017164139-0f1106ef9c76
 	github.com/onsi/ginkgo v1.13.0 // indirect
 	github.com/prometheus/client_golang v1.6.0
@@ -40,10 +38,9 @@ require (
 	github.com/rancher/wrangler-api v0.6.1-0.20200515193802-dcf70881b087
 	github.com/sirupsen/logrus v1.4.2
 	github.com/urfave/cli v1.22.2
-	golang.org/x/net v0.0.0-20200822124328-c89045814202
-	google.golang.org/grpc v1.31.1
-	google.golang.org/grpc/examples v0.0.0-20200902210233-8630cac324bf // indirect
-	gopkg.in/mgo.v2 v2.0.0-20180705113604-9856a29383ce // indirect
+	golang.org/x/net v0.0.0-20200904194848-62affa334b73
+	google.golang.org/genproto v0.0.0-20200903010400-9bfcb5116336 // indirect
+	google.golang.org/grpc v1.29.1
 	k8s.io/api v0.18.5
 	k8s.io/apimachinery v0.18.5
 	k8s.io/apiserver v0.18.5
