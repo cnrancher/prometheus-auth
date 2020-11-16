@@ -11,9 +11,13 @@ import (
 	"golang.org/x/net/http2/hpack"
 )
 
+/* PANDARIA: Fix get request head X-RANCHER-GROUP is nil.
+we need to be aware that keys are canonicalized header["X-Rancher-Group"] will be work, but header["X-RANCHER-GROUP"] will not return any value.
+Details view https://github.com/golang/go/issues/34799
+*/
 const (
-	rancherUserHeaderKey   = "X-RANCHER-USER"
-	rancherGroupHeaderKey  = "X-RANCHER-GROUP"
+	rancherUserHeaderKey   = "X-Rancher-User"
+	rancherGroupHeaderKey  = "X-Rancher-Group"
 	authorizationHeaderKey = "Authorization"
 )
 
